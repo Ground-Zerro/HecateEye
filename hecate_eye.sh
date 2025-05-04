@@ -1,29 +1,18 @@
 #!/bin/bash
 set -e
 
-echo "[+] Загружаем модуль tun..."
-sudo modprobe tun
+read -p "Введите VLESS-ссылку (начиная с vless://): " vless_url
 
-echo "[+] Обновляем apt и ставим ping, curl, dnsutils..."
-sudo apt-get update -qq
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iputils-ping curl dnsutils jq
-
-echo "[+] Отключаем systemd-resolved и настраиваем /etc/resolv.conf..."
-sudo systemctl disable --now systemd-resolved || true
-sudo rm -f /etc/resolv.conf
-echo -e "nameserver 8.8.8.8\nnameserver 8.8.4.4" | sudo tee /etc/resolv.conf > /dev/null
-
-read -p "Введите VLESS‑ссылку (начиная с vless://): " vless_url
-
+fragment=${vless_url#*#}
+name=$(printf '%b' "${fragment//%/\\x}")
 url_body=${vless_url#vless://}
-uuid=$(echo "$url_body" | cut -d'@' -f1)
-hostport_and_params=$(echo "$url_body" | cut -d'@' -f2)
-
-hostport=$(echo "$hostport_and_params" | cut -d'?' -f1)
-raw_params=$(echo "$hostport_and_params" | cut -d'?' -f2 | cut -d'#' -f1)
-
-server=$(echo "$hostport" | cut -d':' -f1)
-port=$(echo "$hostport" | cut -d':' -f2)
+uuid=${url_body%%@*}
+hostport_and_params=${url_body#*@}
+hostport=${hostport_and_params%%\?*}
+raw_params=${hostport_and_params#*\?}
+raw_params=${raw_params%%#*}
+server=${hostport%%:*}
+port=${hostport#*:}
 
 get_param() {
   echo "$raw_params" | tr '&' '\n' | grep "^$1=" | cut -d'=' -f2-
@@ -35,10 +24,36 @@ sid=$(get_param sid)
 sni=$(get_param sni)
 fp=$(get_param fp)
 
-if [[ -z "$uuid" || -z "$server" || -z "$port" || -z "$pbk" || -z "$sid" || -z "$sni" || -z "$fp" || -z "$flow" ]]; then
+if [[ -z "$uuid" || -z "$server" || -z "$port" || -z "$flow" || -z "$pbk" || -z "$sid" || -z "$sni" || -z "$fp" || -z "$name" ]]; then
     echo "[!] Ошибка: Не удалось извлечь все необходимые параметры из ссылки"
     exit 1
 fi
+
+echo "[+] Извлечено:"
+echo "    tag:               $name"
+echo "    server:            $server"
+echo "    port:              $port"
+echo "    uuid:              $uuid"
+echo "    flow:              $flow"
+echo "    packet_encoding:   xudp"
+echo "    domain_strategy:   ipv4_only"
+echo "    tls.utls.fp:       $fp"
+echo "    tls.reality.pbk:   $pbk"
+echo "    tls.reality.sid:   $sid"
+echo "    tls.server_name:   $sni"
+echo
+
+echo "[+] Загружаем модуль tun..."
+sudo modprobe tun
+
+echo "[+] Обновляем apt и ставим софт..."
+sudo apt-get update -qq
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iputils-ping curl dnsutils ipcalc tcpdump jq
+
+echo "[+] Отключаем systemd-resolved и настраиваем /etc/resolv.conf..."
+sudo systemctl disable --now systemd-resolved || true
+sudo rm -f /etc/resolv.conf
+echo -e "nameserver 8.8.8.8\nnameserver 8.8.4.4" | sudo tee /etc/resolv.conf > /dev/null
 
 echo "[+] Загружаем и устанавливаем sing-box v1.11.9..."
 wget -q https://github.com/sagernet/sing-box/releases/download/v1.11.9/sing-box_1.11.9_linux_amd64.deb -O /tmp/sing-box.deb
@@ -51,47 +66,40 @@ sudo mkdir -p /etc/sing-box
 echo "[+] Генерируем /etc/sing-box/config.json..."
 sudo tee /etc/sing-box/config.json > /dev/null <<EOF
 {
-  "log": { "level": "info" },
-  "dns": {
-    "servers": [
-      {
-        "address": "tls://dns.quad9.net",
-        "address_resolver": "local-dns",
-        "detour": "vless-out"
-      },
-      {
-        "address": "tls://dns.google",
-        "address_resolver": "local-dns",
-        "detour": "vless-out"
-      },
-      {
-        "tag": "local-dns",
-        "address": "1.1.1.1",
-        "detour": "direct-out"
-      }
-    ],
-    "strategy": "prefer_ipv4"
+  "log": {
+    "disabled": true
   },
   "inbounds": [
     {
       "type": "tun",
-      "tag": "tun-in",
       "interface_name": "tun0",
       "address": ["10.10.10.2/24"],
-      "mtu": 1500,
+      "mtu": 9000,
       "auto_route": false,
-      "auto_redirect": false
+      "strict_route": false,
+      "domain_strategy": "ipv4_only",
+      "endpoint_independent_nat": true,
+      "sniff": false,
+      "stack": "gvisor",
+      "tag": "tun-in-tun0"
+    },
+    {
+      "type": "mixed",
+      "tag": "mixed-in-tun0",
+      "listen": "0.0.0.0",
+      "listen_port": 1080
     }
   ],
   "outbounds": [
     {
       "type": "vless",
-      "tag": "vless-out",
+      "tag": "$name",
       "server": "$server",
       "server_port": $port,
       "uuid": "$uuid",
       "flow": "$flow",
-      "network": "tcp",
+      "packet_encoding": "xudp",
+      "domain_strategy": "ipv4_only",
       "tls": {
         "enabled": true,
         "server_name": "$sni",
@@ -104,14 +112,27 @@ sudo tee /etc/sing-box/config.json > /dev/null <<EOF
           "public_key": "$pbk",
           "short_id": "$sid"
         }
-      },
-      "multiplex": {}
-    },
-    {
-      "type": "direct",
-      "tag": "direct-out"
+      }
     }
-  ]
+  ],
+  "route": {
+    "rules": [
+      {
+        "inbound": "tun-in-tun0",
+        "action": "route",
+        "outbound": "$name"
+      },
+      {
+        "inbound": "mixed-in-tun0",
+        "action": "route",
+        "outbound": "$name"
+      },
+      {
+        "action": "reject"
+      }
+    ],
+    "auto_detect_interface": false
+  }
 }
 EOF
 
@@ -139,30 +160,27 @@ sudo systemctl enable --now sing-box
 
 sleep 2
 
+echo "[+] Проверяем результат..."
 if ip link show tun0 &>/dev/null; then
-  echo "[+] Интерфейс tun0 создан."
+  echo "[✓] Интерфейс tun0 создан."
 else
-  echo "[!] tun0 не найден. Смотрим логи:"
+  echo "[✗] tun0 не найден. Смотрим логи:"
   journalctl -u sing-box --no-pager -n 20
   exit 1
 fi
 
-echo -e "\n[+] Пинг 8.8.8.8 через tun0..."
-ping -I tun0 -c 4 8.8.8.8
+if ip_tun=$(curl --interface tun0 -s https://api.ipify.org) && [[ -n "$ip_tun" ]]; then
+  echo "[✓] IP (через туннель): $ip_tun"
+else
+  echo "[✗] Не удалось получить IP через tun0"
+  exit 1
+fi
 
-echo -e "\n[+] Пинг 8.8.8.8 через систему..."
-ping -I tun0 -c 4 8.8.8.8
+if ip_direct=$(curl -s https://api.ipify.org) && [[ -n "$ip_direct" ]]; then
+  echo "[✓] IP (напрямую): $ip_direct"
+else
+  echo "[✗] Не удалось получить прямой IP"
+  exit 1
+fi
 
-echo -e "\n[+] Резолвим и пингуем ya.ru через tun0..."
-ping -I tun0 -c 4 ya.ru
-
-echo -e "\n[+] Резолвим и пингуем ya.ru через системный резолвер..."
-ping -I tun0 -c 4 ya.ru
-
-echo -e "\n[+] IP (api.ipify.org) через туннель:"
-curl --interface tun0 -s https://api.ipify.org && echo
-
-echo -e "\n[+] IP (api.ipify.org) напрямую:"
-curl -s https://api.ipify.org && echo
-
-echo -e "\n[+] Если пинги прошли и вы увидели IP — всё работает."
+echo "[+] Устанвока завершена успешно."
