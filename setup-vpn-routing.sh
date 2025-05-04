@@ -11,17 +11,6 @@ GREEN="\e[32m"
 RED="\e[31m"
 NC="\e[0m"
 
-# Проверка и установка ipcalc
-if ! command -v ipcalc &> /dev/null; then
-    echo -e "${YELLOW}[*] Утилита ipcalc не найдена. Устанавливаем...${NC}"
-    apt update && apt install -y ipcalc
-    if ! command -v ipcalc &> /dev/null; then
-        echo -e "${RED}[Ошибка] Не удалось установить ipcalc. Прекращаю выполнение.${NC}"
-        exit 1
-    fi
-    echo -e "${GREEN}ipcalc успешно установлен.${NC}"
-fi
-
 # Проверка, что интерфейс VPN поднят
 if ! ip link show "$VPN_IFACE" &> /dev/null || ! ip -o -f inet addr show "$VPN_IFACE" | grep -q inet; then
     echo -e "${RED}[Ошибка] Интерфейс $VPN_IFACE не существует или не имеет IP-адреса.${NC}"
@@ -47,6 +36,7 @@ else
 fi
 
 echo -e "${YELLOW}[*] Генерируем конфигурационный файл...${NC}"
+sudo mkdir /etc/network/
 cat > "$CONFIG_FILE" <<EOF
 TABLE_ID=$TABLE_ID
 TABLE_NAME=$TABLE_NAME
