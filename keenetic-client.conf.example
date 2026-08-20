@@ -1,0 +1,9 @@
+[main]
+mode = relay
+role = keenetic
+local = 192.168.1.55:1701
+peer = 203.0.113.10:41850
+lan-bridge = br0
+key = <общий секрет>
+session-id = keenetic-router
+verbose = info
